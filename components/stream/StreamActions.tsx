@@ -9,6 +9,7 @@ import { Input }             from '@/components/ui/Input';
 import * as streamLib        from '@/lib/stream';
 import { safeToStroops }     from '@/lib/safe-operations';
 import { queryClient }       from '@/lib/queryClient';
+import { queueTransaction } from '@/lib/offline-transactions';
 
 type StreamStatus = 'active' | 'paused' | 'ended' | 'cancelled';
 
@@ -53,6 +54,19 @@ export function StreamActions({
   async function run(name: string, fn: () => Promise<unknown>) {
     setPending(name);
     setActionError(null);
+    if (!navigator.onLine && (name === 'cancel' || name === 'topup')) {
+      if (name === 'cancel') {
+        queueTransaction({ kind: 'cancel', publicKey: publicKey!, streamAddress });
+      } else {
+        const amount = safeToStroops(topUpAmt.trim());
+        if (amount !== null && amount > 0n) {
+          queueTransaction({ kind: 'topup', publicKey: publicKey!, streamAddress, amount: amount.toString() });
+        }
+      }
+      setActionError('Queued while offline. It will be submitted automatically when you reconnect.');
+      setPending(null);
+      return;
+    }
     try {
       await fn();
       if (!mounted.current) return;

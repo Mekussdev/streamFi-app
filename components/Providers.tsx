@@ -6,6 +6,7 @@ import { ReactQueryProvider } from '@/components/ReactQueryProvider';
 import { Toaster } from 'react-hot-toast';
 import { ServiceWorkerRegistrar } from '@/components/ServiceWorkerRegistrar';
 import { OfflineIndicator } from '@/components/OfflineIndicator';
+import { OfflineTransactionSync } from '@/components/OfflineTransactionSync';
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
@@ -13,6 +14,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       <ReactQueryProvider>
         <WalletProvider>
           <ServiceWorkerRegistrar />
+          <OfflineTransactionSync />
           {children}
           <Toaster position="bottom-right" />
           <OfflineIndicator />

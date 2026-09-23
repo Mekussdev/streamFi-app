@@ -9,6 +9,7 @@ import { StreamCardSkeleton } from "@/components/stream/StreamCardSkeleton";
 import { streamsBySender, streamsByRecipient } from "@/lib/factory";
 import { getStreamAddress, getStreamInfo } from "@/lib/stream";
 import type { StreamInfo } from "@/lib/stream";
+import { readSnapshot, saveSnapshot } from "@/lib/offline-cache";
 
 type Tab = "receiving" | "sending";
 type StreamStatus = "active" | "paused" | "ended" | "cancelled";
@@ -64,6 +65,7 @@ export default function StreamsPage() {
   const [sending, setSending] = useState<StreamRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cachedAt, setCachedAt] = useState<number | null>(null);
 
   const [statusFilter, setStatusFilter] = useState<"ALL" | StreamStatus>("ALL");
 
@@ -88,13 +90,24 @@ export default function StreamsPage() {
         if (!active) return;
         setReceiving(recv);
         setSending(sent);
+        setCachedAt(null);
+        void saveSnapshot(`streams:${publicKey}`, { receiving: recv, sending: sent });
       })
-      .catch((e) => {
+      .catch(async (e) => {
         if (!active) return;
-        console.error(e);
-        setError(e instanceof Error ? e.message : "Failed to load streams.");
-        setReceiving([]);
-        setSending([]);
+        const snapshot = await readSnapshot<{ receiving: StreamRow[]; sending: StreamRow[] }>(`streams:${publicKey}`);
+        if (!active) return;
+        if (snapshot) {
+          setReceiving(snapshot.value.receiving);
+          setSending(snapshot.value.sending);
+          setCachedAt(snapshot.savedAt);
+          setError(null);
+        } else {
+          console.error(e);
+          setError(e instanceof Error ? e.message : "Failed to load streams.");
+          setReceiving([]);
+          setSending([]);
+        }
       })
       .finally(() => { if (active) setLoading(false); });
 
@@ -149,6 +162,11 @@ export default function StreamsPage() {
       </div>
 
       {/* Content */}
+      {cachedAt && (
+        <p className="text-xs text-gray-500 mb-4" role="status">
+          Showing cached data as of {new Date(cachedAt).toLocaleString()}.
+        </p>
+      )}
       {error && (
         <div
           role="alert"

@@ -8,6 +8,7 @@ import { useWallet }            from '@/contexts/WalletContext';
 import { withdraw }             from '@/lib/stream';
 import { CopyHashButton }       from '@/components/ui/CopyHashButton';
 import { queryClient }          from '@/lib/queryClient';
+import { queueTransaction }     from '@/lib/offline-transactions';
 
 type Step = 'idle' | 'signing' | 'submitting' | 'done' | 'error';
 
@@ -40,6 +41,12 @@ export function WithdrawButton({ streamAddress, withdrawable, token, onSuccess }
     }
     setStep('signing');
     setError(null);
+    if (!navigator.onLine) {
+      queueTransaction({ kind: 'withdraw', publicKey, streamAddress, amount: withdrawable.toString() });
+      setError('Queued while offline. It will be submitted automatically when you reconnect.');
+      setStep('error');
+      return;
+    }
     try {
       // withdraw() internally simulates, hands the assembled XDR to signTx
       // (which prompts Freighter), then submits and polls — 'submitting' is
