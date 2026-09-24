@@ -10,7 +10,7 @@ import { Input }             from '@/components/ui/Input';
 import * as streamLib        from '@/lib/stream';
 import { safeToStroops }     from '@/lib/safe-operations';
 import { queryClient }       from '@/lib/queryClient';
-import { invalidateStreamMutation } from '@/lib/query-keys';
+import { invalidateStreamMutation, invalidateProfileAndAllowance } from '@/lib/query-keys';
 import { optimisticStreamStatusUpdate, rollbackStreamStatus } from '@/lib/optimistic-updates';
 
 type StreamStatus = 'active' | 'paused' | 'ended' | 'cancelled';
@@ -73,6 +73,7 @@ export function StreamActions({
       await fn();
       if (!mounted.current) return;
       await invalidateStreamMutation(queryClient, streamAddress);
+      await invalidateProfileAndAllowance(queryClient, publicKey);
       onSuccess?.();
     } catch (e) {
       if (!mounted.current) return;
