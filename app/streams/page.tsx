@@ -2,14 +2,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Plus } from "lucide-react";
+import { Plus, AlertCircle } from "lucide-react";
 import { useWallet } from "@/contexts/WalletContext";
 import { StreamCard } from "@/components/stream/StreamCard";
 import { StreamCardSkeleton } from "@/components/stream/StreamCardSkeleton";
 import { streamsBySender, streamsByRecipient } from "@/lib/factory";
-import { getStreamAddress, getStreamInfo } from "@/lib/stream";
-import type { StreamInfo } from "@/lib/stream";
+import { getStreamAddress, getStreamInfo, type StreamInfo } from '@/lib/stream';
 import { readSnapshot, saveSnapshot } from "@/lib/offline-cache";
+import { useNetworkStatus } from "@/hooks/useNetworkStatus";
 
 type Tab = "receiving" | "sending";
 type StreamStatus = "active" | "paused" | "ended" | "cancelled";
@@ -18,6 +18,11 @@ interface StreamRow {
   id: string;
   info: StreamInfo;
   status: StreamStatus;
+}
+
+interface LoadRowsResult {
+  rows: StreamRow[];
+  failedCount: number;
 }
 
 function deriveStatus(info: StreamInfo, now: number): StreamStatus {
@@ -31,17 +36,22 @@ async function loadRows(
   publicKey: string,
   role: "sender" | "recipient",
   now: number,
-): Promise<StreamRow[]> {
+): Promise<LoadRowsResult> {
+  // Let initial list-fetch failures propagate so the page can surface a
+  // visible error instead of silently rendering an empty state.
   const ids =
     role === "sender"
       ? await streamsBySender(publicKey, publicKey, 0, 100)
       : await streamsByRecipient(publicKey, publicKey, 0, 100);
 
+  if (!ids || !Array.isArray(ids)) return { rows: [], failedCount: 0 };
+
   const rows: StreamRow[] = [];
+  let failedCount = 0;
   for (const id of ids) {
     try {
       const addr = await getStreamAddress(publicKey, id);
-      if (!addr) continue;
+      if (!addr) { failedCount++; continue; }
       const info = await getStreamInfo(publicKey, addr);
       rows.push({
         id: id.toString(),
@@ -49,16 +59,19 @@ async function loadRows(
         status: deriveStatus(info, now),
       });
     } catch {
-      /* skip invalid */
+      failedCount++;
     }
   }
-  return rows;
+  return { rows, failedCount };
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function StreamsPage() {
   const { publicKey, connected } = useWallet();
+  // The global NetworkTroubleBanner already covers RPC-down / fetch-failure
+  // cases, so suppress this page's own error row when it's showing.
+  const { status: networkStatus } = useNetworkStatus();
 
   const [tab, setTab] = useState<Tab>("receiving");
   const [receiving, setReceiving] = useState<StreamRow[]>([]);
@@ -66,6 +79,7 @@ export default function StreamsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cachedAt, setCachedAt] = useState<number | null>(null);
+  const [partialError, setPartialError] = useState<string | null>(null);
 
   const [statusFilter, setStatusFilter] = useState<"ALL" | StreamStatus>("ALL");
 
@@ -75,12 +89,14 @@ export default function StreamsPage() {
       setReceiving([]);
       setSending([]);
       setError(null);
+      setPartialError(null);
       return;
     }
     let active = true;
 
     setLoading(true);
     setError(null);
+    setPartialError(null);
     const now = Math.floor(Date.now() / 1000);
     Promise.all([
       loadRows(publicKey, "recipient", now),
@@ -88,10 +104,16 @@ export default function StreamsPage() {
     ])
       .then(([recv, sent]) => {
         if (!active) return;
-        setReceiving(recv);
-        setSending(sent);
+        setReceiving(recv.rows);
+        setSending(sent.rows);
         setCachedAt(null);
-        void saveSnapshot(`streams:${publicKey}`, { receiving: recv, sending: sent });
+        void saveSnapshot(`streams:${publicKey}`, { receiving: recv.rows, sending: sent.rows });
+        const totalFailed = recv.failedCount + sent.failedCount;
+        setPartialError(
+          totalFailed > 0
+            ? `${totalFailed} stream${totalFailed === 1 ? "" : "s"} couldn\u2019t load`
+            : null,
+        );
       })
       .catch(async (e) => {
         if (!active) return;
@@ -103,7 +125,7 @@ export default function StreamsPage() {
           setCachedAt(snapshot.savedAt);
           setError(null);
         } else {
-          console.error(e);
+          console.error(e); captureError(e, { tags: { source: 'streams-page' } });
           setError(e instanceof Error ? e.message : "Failed to load streams.");
           setReceiving([]);
           setSending([]);
@@ -167,13 +189,56 @@ export default function StreamsPage() {
           Showing cached data as of {new Date(cachedAt).toLocaleString()}.
         </p>
       )}
-      {error && (
+      {error && networkStatus === "ok" && (
         <div
           role="alert"
           aria-live="polite"
           className="border border-gray-200 dark:border-gray-800 rounded p-4 text-sm text-gray-500 dark:text-gray-400 mb-4"
         >
           {error}
+        </div>
+      )}
+      {partialError && !error && networkStatus === "ok" && (
+        <div
+          role="alert"
+          aria-live="polite"
+          className="card text-center py-3 mb-6 text-sm text-gray-600 dark:text-gray-400 flex items-center justify-center gap-2"
+        >
+          <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+          <span>{partialError} &mdash;</span>
+          <button
+            onClick={() => {
+              setReceiving([]);
+              setSending([]);
+              setLoading(true);
+              setPartialError(null);
+              setError(null);
+              const now = Math.floor(Date.now() / 1000);
+              Promise.all([
+                loadRows(publicKey!, "recipient", now),
+                loadRows(publicKey!, "sender", now),
+              ])
+                .then(([recv, sent]) => {
+                  setReceiving(recv.rows);
+                  setSending(sent.rows);
+                  const totalFailed = recv.failedCount + sent.failedCount;
+                  setPartialError(
+                    totalFailed > 0
+                      ? `${totalFailed} stream${totalFailed === 1 ? "" : "s"} couldn\u2019t load`
+                      : null,
+                  );
+                })
+                .catch((e) => {
+                  console.error(e);
+                  setError(e instanceof Error ? e.message : "Failed to load streams.");
+                })
+                .finally(() => setLoading(false));
+            }}
+            disabled={loading}
+            className="underline font-semibold hover:text-black dark:hover:text-white disabled:opacity-50 disabled:no-underline disabled:cursor-not-allowed"
+          >
+            {loading ? "Retrying\u2026" : "retry"}
+          </button>
         </div>
       )}
       {!connected ? (
@@ -185,6 +250,10 @@ export default function StreamsPage() {
           {Array.from({ length: 3 }).map((_, i) => (
             <StreamCardSkeleton key={i} />
           ))}
+        </div>
+      ) : displayed.length === 0 && error && networkStatus === "trouble" ? (
+        <div className="card text-center py-12 text-sm text-gray-400 dark:text-gray-500">
+          Your streams will appear here once the connection is back.
         </div>
       ) : displayed.length === 0 ? (
         <div className="card text-center py-12 text-sm text-gray-400 dark:text-gray-500">
@@ -224,3 +293,4 @@ export default function StreamsPage() {
     </div>
   );
 }
+import { captureError } from "@/lib/error-tracking";

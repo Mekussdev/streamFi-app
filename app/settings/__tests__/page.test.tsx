@@ -1,7 +1,6 @@
-import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
-import React from "react";
+import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from "vitest";
+import React, { act } from 'react';
 import { createRoot } from "react-dom/client";
-import { act } from "react";
 
 beforeAll(() => {
   window.matchMedia = window.matchMedia || (() => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
@@ -32,6 +31,10 @@ function cleanup(root: ReturnType<typeof createRoot>, container: HTMLElement) {
 describe("SettingsPage", () => {
   beforeEach(() => {
     localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("renders the heading", () => {
@@ -75,6 +78,49 @@ describe("SettingsPage", () => {
   it("renders reset button", () => {
     const { container, root } = renderSettings();
     expect(container.textContent).toContain("Reset to Defaults");
+    cleanup(root, container);
+  });
+
+  it("does not rewrite loaded settings on initial mount (#422)", () => {
+    localStorage.setItem("conduit:settings", JSON.stringify({ currency: "EUR" }));
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem");
+
+    const { root, container } = renderSettings();
+
+    expect(setItemSpy).not.toHaveBeenCalled();
+    cleanup(root, container);
+  });
+
+  it("does not crash when persisting settings throws (#422)", () => {
+    const { container, root } = renderSettings();
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("Blocked", "SecurityError");
+    });
+
+    const advancedModeToggle = Array.from(container.querySelectorAll("input")).find(
+      (input) => input.getAttribute("type") === "checkbox",
+    );
+
+    expect(() => {
+      act(() => {
+        advancedModeToggle!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+    }).not.toThrow();
+
+    expect(container.textContent).toContain("Settings");
+    cleanup(root, container);
+  });
+
+  it("renders timestamp format toggle (#556)", () => {
+    const { container, root } = renderSettings();
+    expect(container.textContent).toContain("Timestamp Format");
+    expect(container.textContent).toMatch(/Relative|Absolute/);
+    cleanup(root, container);
+  });
+
+  it("renders auto-refresh interval selector (#572)", () => {
+    const { container, root } = renderSettings();
+    expect(container.textContent).toContain("Auto-Refresh Interval");
     cleanup(root, container);
   });
 });

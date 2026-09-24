@@ -7,14 +7,22 @@ import { Toaster } from 'react-hot-toast';
 import { ServiceWorkerRegistrar } from '@/components/ServiceWorkerRegistrar';
 import { OfflineIndicator } from '@/components/OfflineIndicator';
 import { OfflineTransactionSync } from '@/components/OfflineTransactionSync';
+import { NetworkTroubleBanner } from '@/components/NetworkTroubleBanner';
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
-    <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+    <ThemeProvider
+      attribute="class"
+      defaultTheme="system"
+      enableSystem
+      disableTransitionOnChange
+      storageKey="streamfi-theme"
+    >
       <ReactQueryProvider>
         <WalletProvider>
           <ServiceWorkerRegistrar />
           <OfflineTransactionSync />
+          <NetworkTroubleBanner />
           {children}
           <Toaster position="bottom-right" />
           <OfflineIndicator />

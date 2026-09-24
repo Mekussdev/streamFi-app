@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams }                         from 'next/navigation';
 import Link                                  from 'next/link';
-import { ArrowLeft }                         from 'lucide-react';
+import { ArrowLeft, FileText }               from 'lucide-react';
 
 import { Badge }           from '@/components/ui/Badge';
 import { Card }            from '@/components/ui/Card';
@@ -11,11 +11,13 @@ import { RateTicker }      from '@/components/stream/RateTicker';
 import { StreamTimeline }  from '@/components/stream/StreamTimeline';
 import { StreamFlowChart } from '@/components/stream/StreamFlowChart';
 import { StreamActions }   from '@/components/stream/StreamActions';
+import { OperatorInfo }    from '@/components/stream/OperatorInfo';
 import { useWallet }       from '@/contexts/WalletContext';
-import { getStreamAddress, getStreamInfo, getWithdrawable } from '@/lib/stream';
+import { getStreamAddress, getStreamInfo, getWithdrawable, type StreamInfo } from '@/lib/stream';
+import { useNetworkStatus }                                from '@/hooks/useNetworkStatus';
 import { fromStroops, formatTimestamp, truncateAddress }    from '@/lib/format';
 import { tokenByAddress } from '@/lib/tokens';
-import type { StreamInfo } from '@/lib/stream';
+import { useSettings, MIN_REFRESH_INTERVAL_S }             from '@/hooks/useSettings';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -40,6 +42,11 @@ const STREAM_REFRESH_MS = 20_000;
 export default function StreamPage() {
   const { id }                                    = useParams<{ id: string }>();
   const { publicKey, connected }                  = useWallet();
+  // RPC-down / fetch-failure messaging is handled globally by
+  // NetworkTroubleBanner — defer to it rather than printing a raw
+  // "circuit breaker open" string here.
+  const { status: networkStatus }                 = useNetworkStatus();
+  const { autoRefreshInterval }                   = useSettings();
   const mounted                                   = useRef(true);
   const loadSeq                                   = useRef(0);
 
@@ -49,6 +56,7 @@ export default function StreamPage() {
   const [nowSeconds,    setNowSeconds]            = useState(() => Math.floor(Date.now() / 1000));
   const [loading,       setLoading]               = useState(true);
   const [error,         setError]                 = useState<string | null>(null);
+  const [status,        setStatus]                = useState<StreamStatus>('active');
 
   useEffect(() => {
     return () => { mounted.current = false; };
@@ -77,19 +85,27 @@ export default function StreamPage() {
     setLoading(true);
     setError(null);
     try {
+      if (!/^\d+$/.test(id)) {
+        if (isCurrent()) setError('Invalid stream ID.');
+        return;
+      }
+
       const addr = await getStreamAddress(publicKey, BigInt(id));
       if (!isCurrent()) return;
       if (!addr) { setError('Stream not found.'); return; }
 
-      const [streamInfo, wAmt] = await Promise.all([
-        getStreamInfo(publicKey, addr),
-        getWithdrawable(publicKey, addr),
-      ]);
-
+      const streamInfo = await getStreamInfo(publicKey, addr);
       if (!isCurrent()) return;
+
       setStreamAddress(addr);
       setInfo(streamInfo);
-      setWithdrawable(wAmt);
+
+      try {
+        const wAmt = await getWithdrawable(publicKey, addr);
+        if (isCurrent()) setWithdrawable(wAmt);
+      } catch {
+        if (isCurrent()) setWithdrawable(0n);
+      }
     } catch (e) {
       if (!isCurrent()) return;
       setError(e instanceof Error ? e.message : 'Failed to load stream.');
@@ -100,31 +116,46 @@ export default function StreamPage() {
 
   useEffect(() => { loadStream(); }, [loadStream]);
 
-  // Background refresh so a pause/cancel from another device/tab is reflected
-  // without a manual reload. Silent — never touches `loading`, and a transient
-  // RPC error just keeps the last-good data (the 1s tick still handles the
-  // time-based `ended` transition) (#401).
+  // Auto-refresh stream data at the user-configured interval (#572).
+  // The minimum enforced by useSettings is MIN_REFRESH_INTERVAL_S (10 s).
+  // When interval is 0 the effect is a no-op so manual STREAM_REFRESH_MS
+  // polling still works as before.
   useEffect(() => {
-    if (!publicKey || !streamAddress) return;
-    const addr = streamAddress;
-    const t = setInterval(async () => {
-      try {
-        const [streamInfo, wAmt] = await Promise.all([
-          getStreamInfo(publicKey, addr),
-          getWithdrawable(publicKey, addr),
-        ]);
-        if (mounted.current) {
-          setInfo(streamInfo);
-          setWithdrawable(wAmt);
-        }
-      } catch {
-        /* keep last-good data */
-      }
-    }, STREAM_REFRESH_MS);
+    if (!autoRefreshInterval || autoRefreshInterval < MIN_REFRESH_INTERVAL_S) return;
+    const intervalMs = autoRefreshInterval * 1000;
+    const t = setInterval(() => { void loadStream(); }, intervalMs);
     return () => clearInterval(t);
-  }, [publicKey, streamAddress]);
+  }, [autoRefreshInterval, loadStream]);
 
-  const status: StreamStatus = info ? deriveStatus(info, nowSeconds) : 'active';
+  useEffect(() => {
+    if (info) setStatus(deriveStatus(info, nowSeconds));
+  }, [info, nowSeconds]);
+
+  useEffect(() => {
+    if (!info || status !== 'active' || info.endTime === 0) return;
+
+    const endAt = info.endTime * 1000;
+    let id: ReturnType<typeof setTimeout>;
+    let active = true;
+    const scheduleEnd = () => {
+      const remaining = endAt - Date.now();
+      if (remaining <= 0) {
+        setStatus('ended');
+        if (publicKey && streamAddress) {
+          void getWithdrawable(publicKey, streamAddress)
+            .then((amount) => { if (active) setWithdrawable(amount); })
+            .catch(() => { /* keep the last known balance on refresh failure */ });
+        }
+        return;
+      }
+      id = setTimeout(scheduleEnd, Math.min(remaining, 2_147_483_647));
+    };
+    scheduleEnd();
+    return () => {
+      active = false;
+      clearTimeout(id);
+    };
+  }, [info, status, publicKey, streamAddress]);
 
   // ── Render states ─────────────────────────────────────────────────────────
 
@@ -153,7 +184,13 @@ export default function StreamPage() {
       <Link href="/streams" className="inline-flex items-center gap-1.5 text-xs text-gray-400 hover:text-black dark:hover:text-white mb-6">
         <ArrowLeft className="w-3.5 h-3.5" /> All streams
       </Link>
-      <p className="text-sm text-gray-500 dark:text-gray-400">{error ?? 'Stream not found.'}</p>
+      <p className="text-sm text-gray-500 dark:text-gray-400">
+        {error
+          ? networkStatus === 'trouble'
+            ? "Can't reach the network right now — this stream will load once the connection is back."
+            : error
+          : 'Stream not found.'}
+      </p>
     </div>
   );
 
@@ -176,10 +213,14 @@ export default function StreamPage() {
   const tokenSymbol = tokenByAddress(info.token, 'testnet')?.symbol ?? truncateAddress(info.token);
 
   return (
-    <div className="max-w-2xl mx-auto px-4 py-10">
+    <div
+      className="max-w-2xl mx-auto px-4 py-10 print-receipt"
+      data-stream-id={`Stream #${id}`}
+      data-print-date={new Date().toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" })}
+    >
 
       {/* Back */}
-      <Link href="/streams" className="inline-flex items-center gap-1.5 text-xs text-gray-400 hover:text-black dark:hover:text-white mb-6">
+      <Link href="/streams" className="inline-flex items-center gap-1.5 text-xs text-gray-400 hover:text-black dark:hover:text-white mb-6 print:hidden">
         <ArrowLeft className="w-3.5 h-3.5" /> All streams
       </Link>
 
@@ -189,7 +230,19 @@ export default function StreamPage() {
           <p className="text-xs text-gray-400 dark:text-gray-500 mb-1 font-mono">{truncateAddress(streamAddress)}</p>
           <h1 className="text-2xl font-black tracking-tight">Stream #{id}</h1>
         </div>
-        <Badge status={status} />
+        <div className="flex items-center gap-2">
+          <Badge status={status} />
+          {/* Download PDF summary — triggers the @media print stylesheet (#571) */}
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium border border-gray-300 dark:border-gray-700 text-black dark:text-white hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors print:hidden"
+            aria-label="Download PDF summary"
+          >
+            <FileText className="w-3.5 h-3.5" aria-hidden="true" />
+            PDF
+          </button>
+        </div>
       </div>
 
       {/* Live withdrawable counter — active only */}
@@ -200,7 +253,19 @@ export default function StreamPage() {
             <RateTicker
               ratePerSecond={info.ratePerSecond}
               startBalance={withdrawable}
+              endTime={info.endTime}
             />
+          </p>
+          <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">{tokenSymbol}</p>
+        </Card>
+      )}
+
+      {/* Ended — show the final claimable balance */}
+      {status === 'ended' && (
+        <Card className="mb-6 text-center">
+          <p className="text-xs text-gray-400 dark:text-gray-500 mb-1">Final balance, ready to withdraw</p>
+          <p className="text-4xl font-black font-mono tabular-nums">
+            {fromStroops(withdrawable)}
           </p>
           <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">{tokenSymbol}</p>
         </Card>
@@ -276,16 +341,41 @@ export default function StreamPage() {
 
       {/* Actions */}
       {(isSender || isRecipient) && (
-        <StreamActions
-          streamAddress={streamAddress}
-          status={status}
-          clawbackEnabled={info.clawbackEnabled}
-          isSender={isSender}
-          isRecipient={isRecipient}
-          withdrawable={withdrawable}
-          token={tokenSymbol}
-          onSuccess={loadStream}
-        />
+        <div className="print:hidden">
+          <StreamActions
+            streamAddress={streamAddress}
+            status={status}
+            clawbackEnabled={info.clawbackEnabled}
+            isSender={isSender}
+            isRecipient={isRecipient}
+            withdrawable={withdrawable}
+            token={tokenSymbol}
+            onSuccess={loadStream}
+          />
+        </div>
+      )}
+
+      {/* Delegated operator — shown when the stream has one set (#473) */}
+      {info.operator && (
+        <div className="mt-4">
+          <OperatorInfo
+            streamAddress={streamAddress}
+            operator={info.operator}
+            isSender={isSender}
+            onSuccess={loadStream}
+          />
+        </div>
+      )}
+
+      {info.operator && (
+        <div className="mt-4">
+          <OperatorInfo
+            streamAddress={streamAddress}
+            operator={info.operator}
+            isSender={isSender}
+            onSuccess={loadStream}
+          />
+        </div>
       )}
 
       {/* Clawback warning */}
